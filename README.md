@@ -2,7 +2,7 @@
 
 A fast and simple HTTPS proxy checker. It downloads 30,000+ fresh proxies, checks them via two public IP-detection services, and saves the working ones in ProxyCap-compatible format.
 
-## 🔧 Features
+## 🔧 Features 
 
 - ✅ Stable, large pool
 - 🚀 **Multithreaded** (60 threads)
