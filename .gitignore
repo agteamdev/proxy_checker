@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+live_proxies.csv
+proxy_checker.log
+.idea/
+.vscode/
