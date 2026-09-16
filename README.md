@@ -152,8 +152,8 @@ Binaries are built automatically by `.github/workflows/release-build.yml`
 whenever a tag starting with `v` is pushed:
 
 ```bash
-git tag -a v2.2.0 -m "AppImage build, app icon, README screenshot"
-git push origin v2.2.0
+git tag -a vX.Y.Z -m "Release notes for this version"
+git push origin vX.Y.Z
 ```
 
 This creates (or updates) the GitHub Release for that tag with:
