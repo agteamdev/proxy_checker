@@ -5,6 +5,9 @@ pulls proxy lists from several free public sources, tests each proxy
 concurrently, detects its anonymity level, geolocates it and shows live,
 sortable, filterable results in a single window.
 
+![Proxy Checker screenshot](docs/screenshot.png)
+*(mockup layout — swap in a real screenshot, see [Screenshot](#screenshot) below)*
+
 ## Features
 
 - 🖥️ **Desktop GUI** (Tkinter, no extra GUI dependency) — a single,
@@ -39,9 +42,10 @@ sortable, filterable results in a single window.
   panel.
 - 🧵 Fully non-blocking UI — networking happens on background threads and
   reports progress through a thread-safe queue.
-- 📦 **Standalone builds** — Windows `.exe` and a Linux binary are built
-  automatically by GitHub Actions and attached to each GitHub Release, so
-  people without Python installed can just download and run.
+- 📦 **Standalone builds** — a Windows `.exe`, a raw Linux binary, and a
+  Linux **AppImage** (download, `chmod +x`, run — no install, no Python
+  needed) are all built automatically by GitHub Actions and attached to
+  each GitHub Release.
 
 ## Project layout
 
@@ -49,8 +53,13 @@ sortable, filterable results in a single window.
 proxy_checker/
 ├── main.py                        # entry point, launches the GUI
 ├── requirements.txt
+├── assets/
+│   ├── icon.png / icon.ico          # app icon (used by the GUI window and the builds)
+│   └── generate_icon.py              # one-off script that (re)generates the icon
+├── docs/
+│   └── screenshot.png                # README screenshot (see below)
 ├── .github/workflows/
-│   └── release-build.yml           # builds .exe (Windows) + binary (Linux) on tag push
+│   └── release-build.yml           # builds .exe / Linux binary / AppImage on tag push
 ├── src/
 │   ├── config.py                    # thread count, timeouts, sources, URLs
 │   ├── sources.py                    # downloads & merges SOCKS4/SOCKS5 lists
@@ -137,25 +146,28 @@ All defaults (thread count, timeout, proxy sources, check endpoints, output
 file names) live in `src/config.py` and can be edited directly, or adjusted
 per-run from the GUI (threads/timeout).
 
-## Building standalone binaries (Windows .exe / Linux)
+## Building standalone binaries (Windows .exe / Linux binary / AppImage)
 
 Binaries are built automatically by `.github/workflows/release-build.yml`
 whenever a tag starting with `v` is pushed:
 
 ```bash
-git tag -a v2.1.0 -m "SOCKS4/5, anonymity detection, sorting & filters"
-git push origin v2.1.0
+git tag -a v2.2.0 -m "AppImage build, app icon, README screenshot"
+git push origin v2.2.0
 ```
 
-This creates (or updates) the GitHub Release for that tag with
-`proxy-checker-windows.exe` and `proxy-checker-linux` attached, ready to
-download and run without installing Python.
+This creates (or updates) the GitHub Release for that tag with:
+- `proxy-checker-windows.exe` — Windows, run it directly
+- `proxy-checker-linux` — raw Linux binary, `chmod +x` then run
+- `ProxyChecker-x86_64.AppImage` — Linux, `chmod +x` then double-click or
+  run; no installation, no Python required
 
 To build locally instead:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name proxy-checker main.py
+pyinstaller --onefile --windowed --name proxy-checker --icon assets/icon.ico --add-data "assets;assets" main.py   # Windows
+pyinstaller --onefile --name proxy-checker --icon assets/icon.png --add-data "assets:assets" main.py               # Linux/macOS
 # binary/exe appears in dist/
 ```
 

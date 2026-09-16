@@ -1,14 +1,16 @@
-# Builds standalone binaries with PyInstaller for Windows and Linux, then
-# attaches them to the GitHub Release of the pushed tag.
+# Builds standalone binaries with PyInstaller for Windows and Linux
+# (including a Linux AppImage - download, chmod +x, double-click/run, no
+# Python or install step needed), then attaches them all to the GitHub
+# Release of the pushed tag.
 #
 # Trigger: push a tag that starts with "v", e.g.:
-#   git tag -a v2.0.0 -m "..."
-#   git push origin v2.0.0
+#   git tag -a v2.2.0 -m "..."
+#   git push origin v2.2.0
 #
-# Result: a Release for that tag (created if it doesn't exist yet) with two
-# downloadable files attached:
+# Result: a Release for that tag (created if it doesn't exist yet) with:
 #   - proxy-checker-windows.exe
-#   - proxy-checker-linux
+#   - proxy-checker-linux           (raw binary, needs chmod +x)
+#   - ProxyChecker-x86_64.AppImage  (Linux, chmod +x and run, no install)
 
 name: Build and Release
 
@@ -33,7 +35,11 @@ jobs:
           pip install pyinstaller
 
       - name: Build Windows executable
-        run: pyinstaller --onefile --windowed --name proxy-checker-windows main.py
+        run: >
+          pyinstaller --onefile --windowed --name proxy-checker-windows
+          --icon assets/icon.ico
+          --add-data "assets;assets"
+          main.py
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -59,13 +65,55 @@ jobs:
           pip install pyinstaller
 
       - name: Build Linux binary
-        run: pyinstaller --onefile --name proxy-checker-linux main.py
+        run: >
+          pyinstaller --onefile --name proxy-checker-linux
+          --icon assets/icon.png
+          --add-data "assets:assets"
+          main.py
 
-      - name: Upload build artifact
+      - name: Upload raw binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: proxy-checker-linux
           path: dist/proxy-checker-linux
+
+      - name: Assemble AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp dist/proxy-checker-linux AppDir/usr/bin/
+          cp assets/icon_256.png AppDir/proxy-checker.png
+
+          cat > AppDir/proxy-checker.desktop << 'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Proxy Checker
+          Comment=SOCKS4/5 proxy checker with anonymity detection
+          Exec=proxy-checker-linux
+          Icon=proxy-checker
+          Categories=Network;Utility;
+          Terminal=false
+          EOF
+
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/proxy-checker-linux" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          wget -q -O appimagetool.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          # GitHub-hosted runners don't have FUSE, so extract & run instead
+          # of launching the AppImage directly.
+          ./appimagetool.AppImage --appimage-extract
+          ./squashfs-root/AppRun AppDir ProxyChecker-x86_64.AppImage
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-checker-appimage
+          path: ProxyChecker-x86_64.AppImage
 
   release:
     needs: [build-windows, build-linux]
@@ -87,3 +135,4 @@ jobs:
           files: |
             artifacts/proxy-checker-windows/proxy-checker-windows.exe
             artifacts/proxy-checker-linux/proxy-checker-linux
+            artifacts/proxy-checker-appimage/ProxyChecker-x86_64.AppImage

@@ -26,6 +26,7 @@ import logging
 import queue
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -103,6 +104,22 @@ class ProxyChecker:
     def _run(self, on_event) -> None:
         start_time = time.time()
 
+        # Fail fast with a clear message instead of silently burning through
+        # thousands of proxies that can never succeed: SOCKS support in
+        # `requests` requires the PySocks package to be importable.
+        try:
+            import socks  # noqa: F401  (PySocks - only used for this check)
+        except ImportError:
+            on_event({
+                "type": "status",
+                "text": (
+                    "ERROR: PySocks is not installed, so SOCKS4/SOCKS5 proxies "
+                    "cannot be used. Run: pip install \"requests[socks]\" PySocks"
+                ),
+            })
+            on_event({"type": "finished", "elapsed": 0, "found": 0})
+            return
+
         on_event({"type": "status", "text": "Detecting your public IP (for anonymity checks)..."})
         try:
             self._own_ip = requests.get(config.OWN_IP_URL, timeout=10).json().get("ip")
@@ -123,6 +140,7 @@ class ProxyChecker:
 
         done = 0
         alive: List[ProxyResult] = []
+        failure_reasons: Counter = Counter()
         lock = threading.Lock()
 
         def worker(item):
@@ -130,10 +148,12 @@ class ProxyChecker:
             if self._stop_event.is_set():
                 return
             protocol, ip_port = item
-            outcome = self._check_single(protocol, ip_port)
+            outcome, reason = self._check_single(protocol, ip_port)
             with lock:
                 done += 1
                 on_event({"type": "progress", "done": done, "total": total})
+                if reason:
+                    failure_reasons[reason] += 1
             if outcome is not None:
                 with lock:
                     alive.append(outcome)
@@ -161,19 +181,27 @@ class ProxyChecker:
         self._save_csv(alive)
         self._save_txt(alive)
 
+        # Free public proxy lists are typically 90%+ dead - that's normal.
+        # But if literally nothing is alive, surface *why* so it's obvious
+        # whether this is "just a bad list" or a real configuration problem.
+        if not alive and failure_reasons:
+            top = ", ".join(f"{reason} x{count}" for reason, count in failure_reasons.most_common(3))
+            on_event({"type": "status", "text": f"Most common failure reasons: {top}"})
+
         elapsed = round(time.time() - start_time, 2)
         on_event({"type": "finished", "elapsed": elapsed, "found": len(alive)})
 
-    def _check_single(self, protocol: str, ip_port: str) -> Optional[ProxyResult]:
+    def _check_single(self, protocol: str, ip_port: str) -> "tuple[Optional[ProxyResult], Optional[str]]":
         """
         Test one SOCKS4/SOCKS5 "ip:port" proxy with a single HTTPS request.
-        Returns a ProxyResult (country_code/flag filled in later, in a
-        batch) if the proxy is alive, else None.
+        Returns (ProxyResult, None) if alive, or (None, reason) if dead,
+        where `reason` is a short label used for the end-of-run diagnostics
+        summary (e.g. "ConnectTimeout", "ProxyError").
         """
         try:
             ip, port = ip_port.split(":")
         except ValueError:
-            return None
+            return None, "MalformedAddress"
 
         proxy_url = f"{protocol}://{ip_port}"
         proxies = {"http": proxy_url, "https": proxy_url}
@@ -182,21 +210,22 @@ class ProxyChecker:
         try:
             r = requests.get(config.ANONYMITY_CHECK_URL, proxies=proxies, timeout=self.timeout)
             if r.status_code != 200:
-                return None
+                return None, f"HTTP {r.status_code}"
             payload = r.json()
-        except Exception:
-            return None
+        except Exception as exc:  # noqa: BLE001 - proxy is simply dead/unreachable/etc.
+            return None, type(exc).__name__
         latency_ms = int((time.time() - started) * 1000)
 
         anonymity = self._classify_anonymity(payload.get("headers", {}))
 
-        return ProxyResult(
+        result = ProxyResult(
             ip=ip,
             port=port,
             protocol=protocol.upper(),
             anonymity=anonymity,
             latency_ms=latency_ms,
         )
+        return result, None
 
     def _classify_anonymity(self, headers: dict) -> str:
         """

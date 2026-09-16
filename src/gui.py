@@ -15,6 +15,7 @@ is required beyond `requests` (with the `socks` extra) for the networking.
 
 import csv
 import logging
+import os
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -23,6 +24,13 @@ from . import config
 from .checker import ProxyChecker
 
 log = logging.getLogger(__name__)
+
+# Path to the app icon, relative to the project root (works both when run
+# from source and when bundled by PyInstaller, via sys._MEIPASS).
+def _icon_path() -> str:
+    import sys
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "assets", "icon_64.png")
 
 # Column ids -> (header text, whether to sort numerically)
 COLUMNS = {
@@ -310,6 +318,12 @@ class MainWindow(tk.Tk):
         self.title("Proxy Checker")
         self.geometry("1020x560")
         self.minsize(820, 460)
+
+        try:
+            self._icon_image = tk.PhotoImage(file=_icon_path())
+            self.iconphoto(True, self._icon_image)
+        except Exception as exc:  # noqa: BLE001 - icon is cosmetic, never block startup
+            log.warning("Could not load app icon: %s", exc)
 
         self.event_queue: "queue.Queue" = queue.Queue()
         self.checker: ProxyChecker | None = None
