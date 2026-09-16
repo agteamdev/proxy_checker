@@ -70,6 +70,11 @@ jobs:
   release:
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
+    # The default GITHUB_TOKEN is read-only unless explicitly granted write
+    # access here. Without this block, softprops/action-gh-release fails with
+    # "403 Resource not accessible by integration".
+    permissions:
+      contents: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
