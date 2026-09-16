@@ -6,7 +6,6 @@ concurrently, detects its anonymity level, geolocates it and shows live,
 sortable, filterable results in a single window.
 
 ![Proxy Checker screenshot](docs/screenshot.png)
-*(mockup layout — swap in a real screenshot, see [Screenshot](#screenshot) below)*
 
 ## Features
 
