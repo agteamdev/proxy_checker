@@ -1,11 +1,11 @@
 """
-Fetches raw proxy lists (ip:port) from several free public sources
-and merges/deduplicates them into a single list.
+Fetches raw proxy lists (ip:port) from several free public sources per
+protocol (SOCKS4/SOCKS5) and merges/deduplicates them.
 """
 
 import logging
 import re
-from typing import List
+from typing import List, Tuple
 
 import requests
 
@@ -31,20 +31,23 @@ def _fetch_one(url: str, timeout: int = 15) -> List[str]:
         return []
 
 
-def fetch_all_proxies(sources: List[str] = None) -> List[str]:
+def fetch_all_proxies(sources: dict = None) -> List[Tuple[str, str]]:
     """
-    Download every configured source and return a deduplicated list
-    of "ip:port" strings, preserving first-seen order.
+    Download every configured source for every protocol and return a
+    deduplicated list of (protocol, "ip:port") tuples, preserving
+    first-seen order. protocol is one of "socks4" / "socks5".
     """
     sources = sources or config.PROXY_SOURCES
     seen = set()
-    merged: List[str] = []
+    merged: List[Tuple[str, str]] = []
 
-    for url in sources:
-        for pair in _fetch_one(url):
-            if pair not in seen:
-                seen.add(pair)
-                merged.append(pair)
+    for protocol, urls in sources.items():
+        for url in urls:
+            for pair in _fetch_one(url):
+                key = (protocol, pair)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(key)
 
     log.info("Total unique proxies collected: %d", len(merged))
     return merged

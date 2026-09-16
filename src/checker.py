@@ -2,11 +2,21 @@
 Core proxy-checking engine.
 
 Design notes:
-- Runs entirely off the GUI thread; progress and results are reported through
-  a thread-safe queue.Queue so the GUI can poll it with `root.after(...)`
-  without ever blocking.
-- Each proxy is tested against a plain HTTP endpoint and an HTTPS endpoint
-  separately, so we can report real HTTPS support instead of guessing.
+- Only SOCKS4 and SOCKS5 proxies are supported (plain HTTP proxies are not
+  fetched or tested anymore). Connecting through them requires the
+  `requests[socks]` extra (PySocks) - see requirements.txt.
+- A proxy is checked with a single HTTPS request through the tunnel. That
+  one request tells us three things at once:
+    1. Alive or dead - if the request fails or times out, the proxy is
+       dropped entirely and never appears in the results.
+    2. Latency - round-trip time of that request, in milliseconds.
+    3. Anonymity level - by inspecting which headers httpbin.org received,
+       we can tell whether the proxy leaked our real IP address
+       (Transparent), added forwarding headers without leaking it
+       (Anonymous), or added nothing at all (Elite / high anonymity).
+- Runs entirely off the GUI thread; progress and results are reported
+  through a thread-safe queue.Queue so the GUI can poll it with
+  `root.after(...)` without ever blocking.
 - A `threading.Event` is used as a cooperative stop flag so the user can
   cancel a run in progress from the GUI.
 """
@@ -17,7 +27,7 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import requests
@@ -31,13 +41,19 @@ log = logging.getLogger(__name__)
 class ProxyResult:
     ip: str
     port: str
-    https: bool
-    country_code: str
+    protocol: str          # "SOCKS4" or "SOCKS5"
+    anonymity: str          # "Transparent" / "Anonymous" / "Elite" / "Unknown"
     latency_ms: int
+    country_code: str = ""
+    flag_png: Optional[bytes] = field(default=None, repr=False)
 
     @property
-    def flag(self) -> str:
-        return geoip.country_code_to_flag(self.country_code)
+    def flag_emoji(self) -> str:
+        return geoip.country_code_to_flag_emoji(self.country_code)
+
+    @property
+    def address(self) -> str:
+        return f"{self.ip}:{self.port}"
 
 
 class ProxyChecker:
@@ -58,6 +74,7 @@ class ProxyChecker:
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
         self.results: List[ProxyResult] = []
+        self._own_ip: Optional[str] = None
 
     # -- public API ---------------------------------------------------
 
@@ -85,8 +102,15 @@ class ProxyChecker:
 
     def _run(self, on_event) -> None:
         start_time = time.time()
-        on_event({"type": "status", "text": "Downloading proxy lists..."})
 
+        on_event({"type": "status", "text": "Detecting your public IP (for anonymity checks)..."})
+        try:
+            self._own_ip = requests.get(config.OWN_IP_URL, timeout=10).json().get("ip")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not determine own IP: %s", exc)
+            self._own_ip = None
+
+        on_event({"type": "status", "text": "Downloading proxy lists..."})
         raw_proxies = sources.fetch_all_proxies()
         total = len(raw_proxies)
 
@@ -101,11 +125,12 @@ class ProxyChecker:
         alive: List[ProxyResult] = []
         lock = threading.Lock()
 
-        def worker(ip_port: str):
+        def worker(item):
             nonlocal done
             if self._stop_event.is_set():
                 return
-            outcome = self._check_single(ip_port)
+            protocol, ip_port = item
+            outcome = self._check_single(protocol, ip_port)
             with lock:
                 done += 1
                 on_event({"type": "progress", "done": done, "total": total})
@@ -114,62 +139,94 @@ class ProxyChecker:
                     alive.append(outcome)
 
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            futures = [executor.submit(worker, p) for p in raw_proxies]
+            futures = [executor.submit(worker, item) for item in raw_proxies]
             for f in futures:
                 if self._stop_event.is_set():
                     break
                 f.result()
 
-        # Resolve countries for everything that is alive, in one batch pass.
+        # Resolve countries + flag icons for everything alive, in one batch pass.
         if alive:
             on_event({"type": "status", "text": "Resolving proxy countries..."})
             country_map = geoip.lookup_countries([r.ip for r in alive])
+            flag_cache = {}
             for r in alive:
                 r.country_code = country_map.get(r.ip, "")
+                if r.country_code and r.country_code not in flag_cache:
+                    flag_cache[r.country_code] = geoip.fetch_flag_png(r.country_code)
+                r.flag_png = flag_cache.get(r.country_code)
                 on_event({"type": "result", "result": r})
 
         self.results = alive
         self._save_csv(alive)
+        self._save_txt(alive)
 
         elapsed = round(time.time() - start_time, 2)
         on_event({"type": "finished", "elapsed": elapsed, "found": len(alive)})
 
-    def _check_single(self, ip_port: str) -> Optional[ProxyResult]:
+    def _check_single(self, protocol: str, ip_port: str) -> Optional[ProxyResult]:
         """
-        Test one "ip:port" proxy. Returns a ProxyResult (country_code left
-        blank, filled in later in a batch) if the proxy is alive, else None.
+        Test one SOCKS4/SOCKS5 "ip:port" proxy with a single HTTPS request.
+        Returns a ProxyResult (country_code/flag filled in later, in a
+        batch) if the proxy is alive, else None.
         """
         try:
             ip, port = ip_port.split(":")
         except ValueError:
             return None
 
-        proxies = {"http": f"http://{ip_port}", "https": f"http://{ip_port}"}
+        proxy_url = f"{protocol}://{ip_port}"
+        proxies = {"http": proxy_url, "https": proxy_url}
 
-        # 1. Plain HTTP check - this is the minimum bar for "alive".
         started = time.time()
         try:
-            r = requests.get(config.HTTP_CHECK_URL, proxies=proxies, timeout=self.timeout)
+            r = requests.get(config.ANONYMITY_CHECK_URL, proxies=proxies, timeout=self.timeout)
             if r.status_code != 200:
                 return None
+            payload = r.json()
         except Exception:
             return None
         latency_ms = int((time.time() - started) * 1000)
 
-        # 2. HTTPS check - determines whether the proxy can tunnel HTTPS traffic.
-        https_ok = False
-        try:
-            r = requests.get(config.HTTPS_CHECK_URL, proxies=proxies, timeout=self.timeout)
-            https_ok = r.status_code == 200
-        except Exception:
-            https_ok = False
+        anonymity = self._classify_anonymity(payload.get("headers", {}))
 
-        return ProxyResult(ip=ip, port=port, https=https_ok, country_code="", latency_ms=latency_ms)
+        return ProxyResult(
+            ip=ip,
+            port=port,
+            protocol=protocol.upper(),
+            anonymity=anonymity,
+            latency_ms=latency_ms,
+        )
+
+    def _classify_anonymity(self, headers: dict) -> str:
+        """
+        Transparent: the proxy forwarded our real public IP to the target
+                      site (the site can trivially identify who is behind it).
+        Anonymous:   the proxy added forwarding-related headers, but did not
+                      leak our real IP.
+        Elite:       no forwarding headers were added at all - the target
+                      site cannot tell a proxy is being used.
+        """
+        lower_headers = {k.lower(): v for k, v in headers.items()}
+        combined_values = " ".join(str(v) for v in lower_headers.values())
+
+        if self._own_ip and self._own_ip in combined_values:
+            return "Transparent"
+        if any(h in lower_headers for h in config.PROXY_INDICATOR_HEADERS):
+            return "Anonymous"
+        return "Elite"
 
     def _save_csv(self, results: List[ProxyResult]) -> None:
         with open(config.RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Country", "IP", "Port", "HTTPS", "Latency_ms"])
+            writer.writerow(["Country", "IP", "Port", "Protocol", "Anonymity", "Latency_ms"])
             for r in results:
-                writer.writerow([r.country_code, r.ip, r.port, "Yes" if r.https else "No", r.latency_ms])
+                writer.writerow([r.country_code, r.ip, r.port, r.protocol, r.anonymity, r.latency_ms])
         log.info("Saved %d live proxies to %s", len(results), config.RESULTS_CSV)
+
+    def _save_txt(self, results: List[ProxyResult]) -> None:
+        """Plain text export, one usable proxy URL per line, e.g. socks5://1.2.3.4:1080"""
+        with open(config.RESULTS_TXT, "w", encoding="utf-8") as f:
+            for r in results:
+                f.write(f"{r.protocol.lower()}://{r.address}\n")
+        log.info("Saved %d live proxies to %s", len(results), config.RESULTS_TXT)

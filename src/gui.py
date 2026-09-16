@@ -4,11 +4,13 @@ Tkinter GUI for the proxy checker.
 Single window, split into two columns via a resizable PanedWindow:
   - Left column ("Process"): settings, start/stop controls, progress bar,
     running log.
-  - Right column ("Results"): a live-updating table with columns
-    Flag | IP | Port | HTTPS, filled in as proxies are confirmed alive.
+  - Right column ("Results"): a live-updating, sortable, filterable table
+    with a flag icon, row number, country code, IP, port, protocol,
+    anonymity level and latency (ms) for every proxy confirmed alive.
+    Right-click a row to copy its IP / IP:port / full row to the clipboard.
 
 Only the standard library is used (tkinter), so no extra GUI dependency
-is required beyond `requests` for the networking itself.
+is required beyond `requests` (with the `socks` extra) for the networking.
 """
 
 import csv
@@ -21,6 +23,16 @@ from . import config
 from .checker import ProxyChecker
 
 log = logging.getLogger(__name__)
+
+# Column ids -> (header text, whether to sort numerically)
+COLUMNS = {
+    "country": ("Country", False),
+    "ip": ("IP", False),
+    "port": ("Port", True),
+    "protocol": ("Protocol", False),
+    "anonymity": ("Anonymity", False),
+    "latency": ("Latency (ms)", True),
+}
 
 
 class ProcessPanel(ttk.Frame):
@@ -77,7 +89,7 @@ class ProcessPanel(ttk.Frame):
 
 
 class ResultsPanel(ttk.Frame):
-    """Right-hand column: live table of proxies confirmed alive."""
+    """Right-hand column: sortable/filterable live table of alive proxies."""
 
     def __init__(self, master):
         super().__init__(master, padding=10)
@@ -88,39 +100,167 @@ class ResultsPanel(ttk.Frame):
         self.count_var = tk.StringVar(value="0 found")
         ttk.Label(header, textvariable=self.count_var).pack(side="right")
 
+        # -- filter bar --------------------------------------------------
+        filters = ttk.Frame(self)
+        filters.pack(fill="x", pady=(0, 5))
+
+        ttk.Label(filters, text="Search IP:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._refresh_view())
+        ttk.Entry(filters, textvariable=self.search_var, width=16).pack(side="left", padx=(2, 10))
+
+        ttk.Label(filters, text="Protocol:").pack(side="left")
+        self.protocol_filter = tk.StringVar(value="All")
+        proto_box = ttk.Combobox(
+            filters, textvariable=self.protocol_filter, state="readonly", width=8,
+            values=["All", "SOCKS4", "SOCKS5"],
+        )
+        proto_box.pack(side="left", padx=(2, 10))
+        proto_box.bind("<<ComboboxSelected>>", lambda *_: self._refresh_view())
+
+        ttk.Label(filters, text="Anonymity:").pack(side="left")
+        self.anonymity_filter = tk.StringVar(value="All")
+        anon_box = ttk.Combobox(
+            filters, textvariable=self.anonymity_filter, state="readonly", width=11,
+            values=["All", "Transparent", "Anonymous", "Elite"],
+        )
+        anon_box.pack(side="left", padx=(2, 0))
+        anon_box.bind("<<ComboboxSelected>>", lambda *_: self._refresh_view())
+
+        # -- table ---------------------------------------------------------
         table_frame = ttk.Frame(self)
         table_frame.pack(fill="both", expand=True)
 
-        columns = ("flag", "ip", "port", "https")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings")
-        self.tree.heading("flag", text="Flag")
-        self.tree.heading("ip", text="IP")
-        self.tree.heading("port", text="Port")
-        self.tree.heading("https", text="HTTPS")
-        self.tree.column("flag", width=50, anchor="center")
-        self.tree.column("ip", width=140, anchor="center")
-        self.tree.column("port", width=70, anchor="center")
-        self.tree.column("https", width=90, anchor="center")
+        self.tree = ttk.Treeview(table_frame, columns=list(COLUMNS.keys()), show="tree headings")
+        self.tree.heading("#0", text="#")
+        self.tree.column("#0", width=60, anchor="center", stretch=False)
+        for col_id, (label, _numeric) in COLUMNS.items():
+            self.tree.heading(col_id, text=label, command=lambda c=col_id: self._sort_by(c))
+        self.tree.column("country", width=70, anchor="center")
+        self.tree.column("ip", width=120, anchor="center")
+        self.tree.column("port", width=60, anchor="center")
+        self.tree.column("protocol", width=70, anchor="center")
+        self.tree.column("anonymity", width=90, anchor="center")
+        self.tree.column("latency", width=100, anchor="center")
 
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        ttk.Button(self, text="Export CSV", command=self.export_csv).pack(fill="x", pady=(5, 0))
+        self.tree.bind("<Button-3>", self._show_context_menu)   # Windows/Linux right click
+        self.tree.bind("<Button-2>", self._show_context_menu)   # macOS right click
 
-        self._rows = []  # raw data kept independent of widget state, for export
+        export_row = ttk.Frame(self)
+        export_row.pack(fill="x", pady=(5, 0))
+        ttk.Button(export_row, text="Export CSV", command=self.export_csv).pack(side="left", expand=True, fill="x")
+        ttk.Button(export_row, text="Export TXT", command=self.export_txt).pack(side="left", expand=True, fill="x", padx=(5, 0))
 
-    def add_row(self, flag: str, ip: str, port: str, https_ok: bool):
-        https_text = "HTTPS" if https_ok else "HTTP only"
-        self.tree.insert("", "end", values=(flag, ip, port, https_text))
-        self._rows.append((flag, ip, port, https_text))
+        self._rows = []          # full dataset, independent of current filter/sort/view
+        self._images = []        # keep PhotoImage refs alive (Tkinter would GC them otherwise)
+        self._sort_column = None
+        self._sort_reverse = False
+
+    # -- data in ------------------------------------------------------------
+
+    def add_row(self, country_code: str, ip: str, port: str, protocol: str,
+                anonymity: str, latency_ms: int, flag_png: bytes | None):
+        photo = None
+        if flag_png:
+            try:
+                photo = tk.PhotoImage(data=flag_png)
+                self._images.append(photo)
+            except Exception:  # noqa: BLE001 - bad/unsupported image data, just skip the icon
+                photo = None
+
+        self._rows.append({
+            "num": len(self._rows) + 1,
+            "country": country_code or "??",
+            "ip": ip,
+            "port": port,
+            "protocol": protocol,
+            "anonymity": anonymity,
+            "latency": latency_ms,
+            "photo": photo,
+        })
         self.count_var.set(f"{len(self._rows)} found")
+        self._refresh_view()
 
     def clear(self):
         self.tree.delete(*self.tree.get_children())
         self._rows.clear()
+        self._images.clear()
         self.count_var.set("0 found")
+
+    # -- filtering / sorting / rendering -------------------------------------
+
+    def _matches_filter(self, row: dict) -> bool:
+        search = self.search_var.get().strip()
+        if search and search not in row["ip"]:
+            return False
+        proto = self.protocol_filter.get()
+        if proto != "All" and row["protocol"] != proto:
+            return False
+        anon = self.anonymity_filter.get()
+        if anon != "All" and row["anonymity"] != anon:
+            return False
+        return True
+
+    def _sort_by(self, col_id: str):
+        if self._sort_column == col_id:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column = col_id
+            self._sort_reverse = False
+        self._refresh_view()
+
+    def _refresh_view(self):
+        self.tree.delete(*self.tree.get_children())
+        visible = [r for r in self._rows if self._matches_filter(r)]
+
+        if self._sort_column:
+            _label, numeric = COLUMNS[self._sort_column]
+            visible.sort(key=lambda r: r[self._sort_column], reverse=self._sort_reverse)
+
+        for row in visible:
+            self.tree.insert(
+                "", "end",
+                text=str(row["num"]),
+                image=row["photo"] if row["photo"] else "",
+                values=(row["country"], row["ip"], row["port"], row["protocol"],
+                        row["anonymity"], row["latency"]),
+            )
+
+    # -- right-click copy menu -----------------------------------------------
+
+    def _show_context_menu(self, event):
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.tree.selection_set(row_id)
+        values = self.tree.item(row_id, "values")
+        country, ip, port, protocol, anonymity, latency = values
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Copy IP", command=lambda: self._copy(ip))
+        menu.add_command(label="Copy IP:Port", command=lambda: self._copy(f"{ip}:{port}"))
+        menu.add_command(
+            label="Copy proxy URL",
+            command=lambda: self._copy(f"{protocol.lower()}://{ip}:{port}"),
+        )
+        menu.add_command(
+            label="Copy full row",
+            command=lambda: self._copy(
+                f"{country}\t{ip}\t{port}\t{protocol}\t{anonymity}\t{latency}"
+            ),
+        )
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy(self, text: str):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    # -- export ---------------------------------------------------------------
 
     def export_csv(self):
         if not self._rows:
@@ -135,8 +275,25 @@ class ResultsPanel(ttk.Frame):
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Flag", "IP", "Port", "HTTPS"])
-            writer.writerows(self._rows)
+            writer.writerow(["Country", "IP", "Port", "Protocol", "Anonymity", "Latency_ms"])
+            for r in self._rows:
+                writer.writerow([r["country"], r["ip"], r["port"], r["protocol"], r["anonymity"], r["latency"]])
+        messagebox.showinfo("Export", f"Saved {len(self._rows)} proxies to {path}")
+
+    def export_txt(self):
+        if not self._rows:
+            messagebox.showinfo("Export", "No results to export yet.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt")],
+            initialfile="live_proxies.txt",
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            for r in self._rows:
+                f.write(f"{r['protocol'].lower()}://{r['ip']}:{r['port']}\n")
         messagebox.showinfo("Export", f"Saved {len(self._rows)} proxies to {path}")
 
 
@@ -151,8 +308,8 @@ class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Proxy Checker")
-        self.geometry("900x520")
-        self.minsize(760, 440)
+        self.geometry("1020x560")
+        self.minsize(820, 460)
 
         self.event_queue: "queue.Queue" = queue.Queue()
         self.checker: ProxyChecker | None = None
@@ -211,14 +368,17 @@ class MainWindow(tk.Tk):
             self.process_panel.status_var.set(f"Checked {done}/{total}")
         elif etype == "result":
             r = event["result"]
-            self.results_panel.add_row(r.flag, r.ip, r.port, r.https)
+            self.results_panel.add_row(
+                r.country_code, r.ip, r.port, r.protocol, r.anonymity, r.latency_ms, r.flag_png
+            )
         elif etype == "finished":
             self.process_panel.set_running(False)
             self.process_panel.status_var.set(
                 f"Done in {event['elapsed']}s — {event['found']} live proxies found."
             )
             self.process_panel.append_log(
-                f"Finished: {event['found']} live proxies saved to {config.RESULTS_CSV}"
+                f"Finished: {event['found']} live proxies saved to "
+                f"{config.RESULTS_CSV} and {config.RESULTS_TXT}"
             )
 
 

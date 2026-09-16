@@ -1,0 +1,84 @@
+# Builds standalone binaries with PyInstaller for Windows and Linux, then
+# attaches them to the GitHub Release of the pushed tag.
+#
+# Trigger: push a tag that starts with "v", e.g.:
+#   git tag -a v2.0.0 -m "..."
+#   git push origin v2.0.0
+#
+# Result: a Release for that tag (created if it doesn't exist yet) with two
+# downloadable files attached:
+#   - proxy-checker-windows.exe
+#   - proxy-checker-linux
+
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Windows executable
+        run: pyinstaller --onefile --windowed --name proxy-checker-windows main.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-checker-windows
+          path: dist/proxy-checker-windows.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Tk (required by tkinter at build time)
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Linux binary
+        run: pyinstaller --onefile --name proxy-checker-linux main.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-checker-linux
+          path: dist/proxy-checker-linux
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub Release with binaries attached
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/proxy-checker-windows/proxy-checker-windows.exe
+            artifacts/proxy-checker-linux/proxy-checker-linux
