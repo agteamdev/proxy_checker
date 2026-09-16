@@ -42,6 +42,15 @@ COLUMNS = {
     "latency": ("Latency (ms)", True),
 }
 
+# Row colors by anonymity level, matching the README screenshot.
+# ttk.Treeview only supports coloring a whole row (not individual cells),
+# so the anonymity level colors the entire row's text.
+ANONYMITY_COLORS = {
+    "Elite": "#107a5b",         # green
+    "Anonymous": "#b48214",      # amber
+    "Transparent": "#b42828",     # red
+}
+
 
 class ProcessPanel(ttk.Frame):
     """Left-hand column: settings, controls, progress bar and log."""
@@ -151,6 +160,9 @@ class ResultsPanel(ttk.Frame):
         self.tree.column("anonymity", width=90, anchor="center")
         self.tree.column("latency", width=100, anchor="center")
 
+        for level, color in ANONYMITY_COLORS.items():
+            self.tree.tag_configure(level, foreground=color)
+
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -237,6 +249,7 @@ class ResultsPanel(ttk.Frame):
                 image=row["photo"] if row["photo"] else "",
                 values=(row["country"], row["ip"], row["port"], row["protocol"],
                         row["anonymity"], row["latency"]),
+                tags=(row["anonymity"],) if row["anonymity"] in ANONYMITY_COLORS else (),
             )
 
     # -- right-click copy menu -----------------------------------------------

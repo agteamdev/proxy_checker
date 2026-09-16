@@ -19,7 +19,8 @@ sortable, filterable results in a single window.
 - 🕵️ **Anonymity level detection** — every live proxy is classified as
   **Transparent** (leaks your real IP to the target site), **Anonymous**
   (adds forwarding headers but hides your real IP) or **Elite** (adds no
-  forwarding headers at all). See [How checks work](#how-checks-work) below.
+  forwarding headers at all), and color-coded in the results table. See
+  [How checks work](#how-checks-work) below.
 - 🌍 **Country flags** — shown as actual small flag icons (downloaded from
   flagcdn.com), not emoji, so they render correctly even on Linux systems
   without a color-emoji font.
@@ -56,7 +57,7 @@ proxy_checker/
 │   ├── icon.png / icon.ico          # app icon (used by the GUI window and the builds)
 │   └── generate_icon.py              # one-off script that (re)generates the icon
 ├── docs/
-│   └── screenshot.png                # README screenshot (see below)
+│   └── screenshot.png                # README screenshot
 ├── .github/workflows/
 │   └── release-build.yml           # builds .exe / Linux binary / AppImage on tag push
 ├── src/
