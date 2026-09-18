@@ -4,7 +4,6 @@ Not part of the shipped application - run once to (re)produce assets/icon.png
 and assets/icon.ico. Requires Pillow: pip install pillow
 """
 
-import math
 from PIL import Image, ImageDraw
 
 SIZE = 512
@@ -14,56 +13,36 @@ def make_icon() -> Image.Image:
     img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # -- rounded-square background with a vertical gradient ----------------
-    top_color = (22, 51, 89)     # dark navy blue
-    bottom_color = (16, 185, 129)  # teal/green
-    radius = 96
+    # -- flat dark rounded-square background (matches the app's dark theme) --
+    bg_color = (15, 23, 42)       # slate-900
+    radius = 108
     mask = Image.new("L", (SIZE, SIZE), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0, 0, SIZE - 1, SIZE - 1], radius=radius, fill=255)
-
-    gradient = Image.new("RGB", (SIZE, SIZE))
-    for y in range(SIZE):
-        t = y / (SIZE - 1)
-        color = tuple(int(top_color[i] + (bottom_color[i] - top_color[i]) * t) for i in range(3))
-        for x in range(SIZE):
-            gradient.putpixel((x, y), color)
-    img.paste(gradient, (0, 0), mask)
+    flat_bg = Image.new("RGBA", (SIZE, SIZE), bg_color + (255,))
+    img.paste(flat_bg, (0, 0), mask)
     draw = ImageDraw.Draw(img)
 
-    # -- faint network dots/lines in the corners (proxy/network motif) -----
-    node_color = (255, 255, 255, 40)
-    nodes = [(90, 90), (150, 60), (60, 150)]
-    for a, b in [(nodes[0], nodes[1]), (nodes[0], nodes[2])]:
-        draw.line([a, b], fill=node_color, width=4)
-    for n in nodes:
-        draw.ellipse([n[0] - 7, n[1] - 7, n[0] + 7, n[1] + 7], fill=node_color)
-
-    nodes2 = [(SIZE - 90, SIZE - 90), (SIZE - 150, SIZE - 60), (SIZE - 60, SIZE - 150)]
-    for a, b in [(nodes2[0], nodes2[1]), (nodes2[0], nodes2[2])]:
-        draw.line([a, b], fill=node_color, width=4)
-    for n in nodes2:
-        draw.ellipse([n[0] - 7, n[1] - 7, n[0] + 7, n[1] + 7], fill=node_color)
-
-    # -- shield shape --------------------------------------------------------
-    cx, cy = SIZE // 2, SIZE // 2 + 6
-    w, h = 132, 168
+    # -- shield shape, green outline + fill (accent color) -------------------
+    accent = (34, 197, 94)   # emerald-500
+    cx, cy = SIZE // 2, SIZE // 2 + 4
+    w, h = 138, 172
     shield = [
-        (cx - w, cy - h + 40),
+        (cx - w, cy - h + 42),
         (cx, cy - h),
-        (cx + w, cy - h + 40),
-        (cx + w, cy + 10),
+        (cx + w, cy - h + 42),
+        (cx + w, cy + 14),
         (cx, cy + h),
-        (cx - w, cy + 10),
+        (cx - w, cy + 14),
     ]
-    draw.polygon(shield, fill=(255, 255, 255, 235))
-    draw.line(shield + [shield[0]], fill=(255, 255, 255, 255), width=6, joint="curve")
+    draw.polygon(shield, fill=accent)
+    draw.line(shield + [shield[0]], fill=(74, 222, 128), width=8, joint="curve")  # lighter green edge
 
-    # -- checkmark inside the shield -----------------------------------------
-    check_color = (16, 122, 91)
-    p1 = (cx - 60, cy)
-    p2 = (cx - 14, cy + 46)
-    p3 = (cx + 68, cy - 56)
-    width = 26
+    # -- white checkmark inside the shield -------------------------------------
+    check_color = (255, 255, 255)
+    p1 = (cx - 58, cy)
+    p2 = (cx - 12, cy + 48)
+    p3 = (cx + 70, cy - 58)
+    width = 28
     draw.line([p1, p2], fill=check_color, width=width)
     draw.line([p2, p3], fill=check_color, width=width)
     for p in (p1, p2, p3):

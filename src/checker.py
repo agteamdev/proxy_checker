@@ -2,9 +2,10 @@
 Core proxy-checking engine.
 
 Design notes:
-- Only SOCKS4 and SOCKS5 proxies are supported (plain HTTP proxies are not
-  fetched or tested anymore). Connecting through them requires the
-  `requests[socks]` extra (PySocks) - see requirements.txt.
+- HTTP, SOCKS4 and SOCKS5 proxies are all supported; which protocols to
+  fetch/check is selectable per run. Connecting through SOCKS4/SOCKS5
+  requires the `requests[socks]` extra (PySocks) - see requirements.txt;
+  HTTP proxies work without it.
 - A proxy is checked with a single HTTPS request through the tunnel. That
   one request tells us three things at once:
     1. Alive or dead - if the request fails or times out, the proxy is
@@ -14,6 +15,10 @@ Design notes:
        we can tell whether the proxy leaked our real IP address
        (Transparent), added forwarding headers without leaking it
        (Anonymous), or added nothing at all (Elite / high anonymity).
+- An optional target count lets a run stop early once enough live proxies
+  have been found, instead of always checking every proxy in every list.
+- Results are never written to disk automatically - only the GUI's Export
+  CSV/TXT buttons save a file, and only where the user chooses.
 - Runs entirely off the GUI thread; progress and results are reported
   through a thread-safe queue.Queue so the GUI can poll it with
   `root.after(...)` without ever blocking.
@@ -21,7 +26,6 @@ Design notes:
   cancel a run in progress from the GUI.
 """
 
-import csv
 import logging
 import queue
 import threading
@@ -42,7 +46,7 @@ log = logging.getLogger(__name__)
 class ProxyResult:
     ip: str
     port: str
-    protocol: str          # "SOCKS4" or "SOCKS5"
+    protocol: str          # "HTTP", "SOCKS4" or "SOCKS5"
     anonymity: str          # "Transparent" / "Anonymous" / "Elite" / "Unknown"
     latency_ms: int
     country_code: str = ""
@@ -62,16 +66,22 @@ class ProxyChecker:
     Orchestrates fetching, checking and reporting proxies.
 
     Usage:
-        checker = ProxyChecker(threads=100, timeout=8)
+        checker = ProxyChecker(threads=100, timeout=8,
+                                protocols=["http", "socks4", "socks5"],
+                                target_count=200)  # None/0 = check everything
         checker.start(on_event=my_queue.put)  # runs in a background thread
         ...
         checker.stop()  # optional, requests cancellation
     """
 
     def __init__(self, threads: int = config.DEFAULT_THREADS,
-                 timeout: int = config.DEFAULT_TIMEOUT):
+                 timeout: int = config.DEFAULT_TIMEOUT,
+                 protocols: Optional[List[str]] = None,
+                 target_count: Optional[int] = None):
         self.threads = threads
         self.timeout = timeout
+        self.protocols = protocols or list(config.PROXY_SOURCES.keys())
+        self.target_count = target_count if target_count and target_count > 0 else None
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
         self.results: List[ProxyResult] = []
@@ -104,21 +114,23 @@ class ProxyChecker:
     def _run(self, on_event) -> None:
         start_time = time.time()
 
-        # Fail fast with a clear message instead of silently burning through
-        # thousands of proxies that can never succeed: SOCKS support in
-        # `requests` requires the PySocks package to be importable.
+        # SOCKS support in `requests` requires the PySocks package to be
+        # importable. If it's missing, don't fail the whole run - HTTP
+        # proxies still work fine without it - just skip SOCKS4/SOCKS5
+        # instead of burning through thousands of proxies that can never
+        # succeed.
+        socks_available = True
         try:
             import socks  # noqa: F401  (PySocks - only used for this check)
         except ImportError:
+            socks_available = False
             on_event({
                 "type": "status",
                 "text": (
-                    "ERROR: PySocks is not installed, so SOCKS4/SOCKS5 proxies "
-                    "cannot be used. Run: pip install \"requests[socks]\" PySocks"
+                    "WARNING: PySocks is not installed, so SOCKS4/SOCKS5 proxies will be "
+                    "skipped (HTTP proxies still work). Run: pip install \"requests[socks]\" PySocks"
                 ),
             })
-            on_event({"type": "finished", "elapsed": 0, "found": 0})
-            return
 
         on_event({"type": "status", "text": "Detecting your public IP (for anonymity checks)..."})
         try:
@@ -128,7 +140,10 @@ class ProxyChecker:
             self._own_ip = None
 
         on_event({"type": "status", "text": "Downloading proxy lists..."})
-        raw_proxies = sources.fetch_all_proxies()
+        selected_sources = {p: urls for p, urls in config.PROXY_SOURCES.items() if p in self.protocols}
+        raw_proxies = sources.fetch_all_proxies(selected_sources)
+        if not socks_available:
+            raw_proxies = [item for item in raw_proxies if item[0] not in ("socks4", "socks5")]
         total = len(raw_proxies)
 
         if total == 0:
@@ -136,7 +151,11 @@ class ProxyChecker:
             on_event({"type": "finished", "elapsed": 0, "found": 0})
             return
 
-        on_event({"type": "status", "text": f"Checking {total} proxies with {self.threads} threads..."})
+        target_note = f" (stopping at {self.target_count} found)" if self.target_count else ""
+        on_event({
+            "type": "status",
+            "text": f"Checking {total} proxies with {self.threads} threads...{target_note}",
+        })
 
         done = 0
         alive: List[ProxyResult] = []
@@ -157,13 +176,19 @@ class ProxyChecker:
             if outcome is not None:
                 with lock:
                     alive.append(outcome)
+                    if self.target_count and len(alive) >= self.target_count:
+                        self._stop_event.set()
 
-        with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            futures = [executor.submit(worker, item) for item in raw_proxies]
-            for f in futures:
-                if self._stop_event.is_set():
-                    break
-                f.result()
+        executor = ThreadPoolExecutor(max_workers=self.threads)
+        futures = [executor.submit(worker, item) for item in raw_proxies]
+        for f in futures:
+            if self._stop_event.is_set():
+                break
+            f.result()
+        # cancel_futures drops any not-yet-started tasks immediately instead
+        # of letting the whole queue drain when stopping early (either by
+        # the user or by hitting the target count).
+        executor.shutdown(wait=True, cancel_futures=True)
 
         # Resolve countries + flag icons for everything alive, in one batch pass.
         if alive:
@@ -178,8 +203,6 @@ class ProxyChecker:
                 on_event({"type": "result", "result": r})
 
         self.results = alive
-        self._save_csv(alive)
-        self._save_txt(alive)
 
         # Free public proxy lists are typically 90%+ dead - that's normal.
         # But if literally nothing is alive, surface *why* so it's obvious
@@ -193,10 +216,10 @@ class ProxyChecker:
 
     def _check_single(self, protocol: str, ip_port: str) -> "tuple[Optional[ProxyResult], Optional[str]]":
         """
-        Test one SOCKS4/SOCKS5 "ip:port" proxy with a single HTTPS request.
-        Returns (ProxyResult, None) if alive, or (None, reason) if dead,
-        where `reason` is a short label used for the end-of-run diagnostics
-        summary (e.g. "ConnectTimeout", "ProxyError").
+        Test one HTTP/SOCKS4/SOCKS5 "ip:port" proxy with a single HTTPS
+        request. Returns (ProxyResult, None) if alive, or (None, reason) if
+        dead, where `reason` is a short label used for the end-of-run
+        diagnostics summary (e.g. "ConnectTimeout", "ProxyError").
         """
         try:
             ip, port = ip_port.split(":")
@@ -244,18 +267,3 @@ class ProxyChecker:
         if any(h in lower_headers for h in config.PROXY_INDICATOR_HEADERS):
             return "Anonymous"
         return "Elite"
-
-    def _save_csv(self, results: List[ProxyResult]) -> None:
-        with open(config.RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Country", "IP", "Port", "Protocol", "Anonymity", "Latency_ms"])
-            for r in results:
-                writer.writerow([r.country_code, r.ip, r.port, r.protocol, r.anonymity, r.latency_ms])
-        log.info("Saved %d live proxies to %s", len(results), config.RESULTS_CSV)
-
-    def _save_txt(self, results: List[ProxyResult]) -> None:
-        """Plain text export, one usable proxy URL per line, e.g. socks5://1.2.3.4:1080"""
-        with open(config.RESULTS_TXT, "w", encoding="utf-8") as f:
-            for r in results:
-                f.write(f"{r.protocol.lower()}://{r.address}\n")
-        log.info("Saved %d live proxies to %s", len(results), config.RESULTS_TXT)

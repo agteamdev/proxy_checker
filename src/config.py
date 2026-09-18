@@ -31,6 +31,11 @@ PROXY_INDICATOR_HEADERS = {"via", "x-forwarded-for", "forwarded", "x-forwarded"}
 # Having several sources per protocol means one dead source does not stop
 # the whole run.
 PROXY_SOURCES = {
+    "http": [
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    ],
     "socks4": [
         "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=10000&country=all",
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
@@ -54,7 +59,8 @@ GEOIP_BATCH_SIZE = 100  # ip-api.com allows up to 100 IPs per batch request
 # two separate letters instead of a picture.
 FLAG_ICON_URL = "https://flagcdn.com/16x12/{code}.png"
 
-# Output files.
+# Default filename suggestions shown in the Export CSV/TXT save dialogs.
+# Results are never written to disk automatically - only on explicit export.
 RESULTS_CSV = "live_proxies.csv"
 RESULTS_TXT = "live_proxies.txt"
 LOG_FILE = "proxy_checker.log"

@@ -1,6 +1,6 @@
 # Proxy Checker (GUI Edition)
 
-A fast, multithreaded SOCKS4/SOCKS5 proxy checker with a desktop GUI. It
+A fast, multithreaded HTTP/SOCKS4/SOCKS5 proxy checker with a desktop GUI. It
 pulls proxy lists from several free public sources, tests each proxy
 concurrently, detects its anonymity level, geolocates it and shows live,
 sortable, filterable results in a single window.
@@ -13,9 +13,10 @@ sortable, filterable results in a single window.
   resizable window split into two columns: **Process** (settings, controls,
   progress bar, log) on the left and a live-updating **Results** table on
   the right.
-- 🧦 **SOCKS4 / SOCKS5 only** — plain HTTP proxies are not fetched or
-  checked. Connecting through SOCKS proxies uses `requests[socks]`
-  (PySocks).
+- 🧦 **HTTP, SOCKS4 and SOCKS5** proxies are all fetched and checked.
+  Connecting through SOCKS4/SOCKS5 proxies uses `requests[socks]`
+  (PySocks); if PySocks isn't installed, SOCKS proxies are skipped
+  automatically and HTTP proxies still work.
 - 🕵️ **Anonymity level detection** — every live proxy is classified as
   **Transparent** (leaks your real IP to the target site), **Anonymous**
   (adds forwarding headers but hides your real IP) or **Elite** (adds no
@@ -36,10 +37,13 @@ sortable, filterable results in a single window.
 - 🚀 **Multithreaded** checking (configurable thread count, default 100).
 - 📚 **Multiple proxy sources per protocol**, merged and deduplicated, so
   one dead source doesn't stop a run.
+- 🎯 **Protocol picker and target count** — choose which of HTTP/SOCKS4/SOCKS5
+  to check, and optionally stop automatically once a set number of live
+  proxies has been found instead of always checking every proxy.
 - ⏹️ **Start/Stop control** — cancel a run in progress at any time.
-- 💾 **CSV and TXT export**, both automatically after each run
-  (`live_proxies.csv` / `live_proxies.txt`) and on demand from the Results
-  panel.
+- 💾 **CSV and TXT export, on demand only** — nothing is written to disk
+  automatically; click **Export CSV** / **Export TXT** and choose where to
+  save.
 - 🧵 Fully non-blocking UI — networking happens on background threads and
   reports progress through a thread-safe queue.
 - 📦 **Standalone builds** — a Windows `.exe`, a raw Linux binary, and a
@@ -62,7 +66,7 @@ proxy_checker/
 │   └── release-build.yml           # builds .exe / Linux binary / AppImage on tag push
 ├── src/
 │   ├── config.py                    # thread count, timeouts, sources, URLs
-│   ├── sources.py                    # downloads & merges SOCKS4/SOCKS5 lists
+│   ├── sources.py                    # downloads & merges HTTP/SOCKS4/SOCKS5 lists
 │   ├── geoip.py                       # batch country lookups + flag icons
 │   ├── checker.py                      # threaded checking engine (liveness + anonymity)
 │   └── gui.py                           # Tkinter GUI (single window, two-column layout)
@@ -98,22 +102,26 @@ pip install -r requirements.txt
 python main.py
 ```
 
-1. (Optional) adjust **Threads** and **Timeout** in the left "Settings" panel.
+1. In the left "Settings" panel, (optionally) adjust **Threads** and
+   **Timeout**, pick which **Protocols** to check (HTTP/SOCKS4/SOCKS5), and
+   optionally set **Proxies needed** to stop automatically once that many
+   live proxies are found (`0` = check everything).
 2. Click **Start**.
 3. Watch the right-hand "Live proxies" table fill up in real time: flag,
    #, country, IP, port, protocol, anonymity, latency — while the left
    panel shows progress and a log.
 4. Use the search box and the Protocol/Anonymity dropdowns above the table
    to filter; click any column header to sort by it.
-5. Right-click any row to copy its IP, IP:port, proxy URL, or the full row.
+5. Right-click any row to copy its IP, IP:port, proxy URL, or the full row
+   — or tick the checkboxes on several rows and copy them all at once.
 6. Click **Stop** at any time to cancel; already-found proxies are kept.
-7. When the run finishes, results are saved to `live_proxies.csv` and
-   `live_proxies.txt` automatically. You can also click **Export CSV** /
-   **Export TXT** under the results table to save a snapshot at any point.
+7. Nothing is saved automatically. Click **Export CSV** / **Export TXT**
+   under the results table whenever you want to save a snapshot, and
+   choose where.
 
 ## How checks work
 
-Each SOCKS4/SOCKS5 proxy is tested with a **single HTTPS request** through
+Each HTTP, SOCKS4 or SOCKS5 proxy is tested with a **single HTTPS request** through
 the tunnel, to `https://httpbin.org/get`, which echoes back every header it
 received:
 
