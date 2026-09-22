@@ -22,9 +22,9 @@ sortable, filterable results in a single window.
   (adds forwarding headers but hides your real IP) or **Elite** (adds no
   forwarding headers at all), and color-coded in the results table. See
   [How checks work](#how-checks-work) below.
-- 🌍 **Country flags** — shown as actual small flag icons (downloaded from
-  flagcdn.com), not emoji, so they render correctly even on Linux systems
-  without a color-emoji font.
+- 🌍 **Country flags** — actual small flag icons, bundled locally with the
+  app (no network needed, no per-run download delay), not emoji, so they
+  render correctly even on Linux systems without a color-emoji font.
 - ⏱️ **Latency (ms)** — round-trip time of the check request, in
   milliseconds, shown per proxy.
 - 🔢 **Row numbering** and a live "N found" counter.
@@ -145,8 +145,11 @@ received:
 
 Country lookups use the free [ip-api.com](https://ip-api.com) batch
 endpoint (no API key required, 45 requests/minute limit, respected by
-batching up to 100 IPs per request in `geoip.py`). Flag icons are fetched
-from [flagcdn.com](https://flagcdn.com).
+batching up to 100 IPs per request in `geoip.py`). Flag icons come from
+[flagcdn.com](https://flagcdn.com), bundled locally under `assets/flags/`
+(regenerate with `python assets/generate_flags.py`, needs internet access
+once) so the app doesn't need the network for them at runtime; any country
+not in the bundle falls back to fetching it from flagcdn.com directly.
 
 ## Configuration
 

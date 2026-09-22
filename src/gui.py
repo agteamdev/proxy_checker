@@ -533,18 +533,25 @@ class ResultsPanel(tk.Frame):
         )
 
         self._rows = []
-        self._images = []
+        self._flag_photo_cache: dict[str, tk.PhotoImage] = {}  # one decoded image per country, reused
 
     # -- data in --------------------------------------------------------------
 
     def add_row(self, country_code, ip, port, protocol, anonymity, latency_ms, flag_png):
         photo = None
         if flag_png:
-            try:
-                photo = tk.PhotoImage(data=flag_png)
-                self._images.append(photo)
-            except Exception:  # noqa: BLE001 - bad/unsupported image data, just skip the icon
-                photo = None
+            cc = country_code or ""
+            photo = self._flag_photo_cache.get(cc)
+            if photo is None:
+                try:
+                    # Decoding a PNG into a Tk image is the actually expensive
+                    # part here (not the file size, which is tiny) - do it
+                    # once per country and reuse the same PhotoImage for every
+                    # row that shares it, instead of once per proxy.
+                    photo = tk.PhotoImage(data=flag_png)
+                    self._flag_photo_cache[cc] = photo
+                except Exception:  # noqa: BLE001 - bad/unsupported image data, just skip the icon
+                    photo = None
 
         row = {
             "num": len(self._rows) + 1,
@@ -569,7 +576,7 @@ class ResultsPanel(tk.Frame):
     def clear(self):
         self.table.clear()
         self._rows.clear()
-        self._images.clear()
+        self._flag_photo_cache.clear()
         self.count_var.set("0 found")
         self.search_var.set("")
         self.protocol_filter.set("All")
@@ -798,7 +805,7 @@ class MainWindow(tk.Tk):
         # rest of the run - looking "frozen" even though checking was still
         # progressing in the background).
         processed = 0
-        max_per_tick = 200
+        max_per_tick = 60
         try:
             while processed < max_per_tick:
                 event = self.event_queue.get_nowait()

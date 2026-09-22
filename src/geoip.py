@@ -6,13 +6,16 @@ Two representations of "flag" are provided:
     exports (CSV/TXT), but many Linux desktops have no color-emoji font
     installed, so Tkinter renders it as two separate letters instead of a
     picture.
-  - `fetch_flag_png`: downloads a small flag PNG icon from flagcdn.com. This
-    is what the GUI uses so the flag always renders as an actual picture,
-    regardless of installed fonts. Results are cached in-process so each
-    country is only downloaded once per run.
+  - `fetch_flag_png`: a small flag PNG icon for the GUI. Checks the locally
+    bundled set under assets/flags/ first (see assets/generate_flags.py) -
+    no network needed, effectively instant. Only countries missing from the
+    bundle fall back to fetching from flagcdn.com. Results are cached in
+    memory either way, so each country is only read/downloaded once per run.
 """
 
 import logging
+import os
+import sys
 from typing import Dict, List, Optional
 
 import requests
@@ -22,6 +25,13 @@ from . import config
 log = logging.getLogger(__name__)
 
 _flag_png_cache: Dict[str, Optional[bytes]] = {}
+
+
+def _bundled_flags_dir() -> str:
+    """assets/flags/, resolved both when run from source and when bundled
+    by PyInstaller (via sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "assets", "flags")
 
 
 def country_code_to_flag_emoji(country_code: str) -> str:
@@ -38,9 +48,10 @@ def country_code_to_flag_emoji(country_code: str) -> str:
 
 def fetch_flag_png(country_code: str) -> Optional[bytes]:
     """
-    Download (and cache) a small PNG flag icon for a 2-letter country code.
-    Returns None if the code is invalid or the download fails - callers
-    should fall back to showing the plain country-code text in that case.
+    Get a small PNG flag icon for a 2-letter country code: the locally
+    bundled copy if there is one (instant, no network), otherwise fetched
+    from flagcdn.com as a fallback. Returns None if the code is invalid or
+    both lookups fail - callers should fall back to plain text in that case.
     """
     if not country_code or len(country_code) != 2 or not country_code.isalpha():
         return None
@@ -48,6 +59,15 @@ def fetch_flag_png(country_code: str) -> Optional[bytes]:
     code = country_code.lower()
     if code in _flag_png_cache:
         return _flag_png_cache[code]
+
+    local_path = os.path.join(_bundled_flags_dir(), f"{code}.png")
+    if os.path.exists(local_path):
+        try:
+            with open(local_path, "rb") as f:
+                _flag_png_cache[code] = f.read()
+            return _flag_png_cache[code]
+        except OSError as exc:
+            log.warning("Failed to read bundled flag for %s: %s", country_code, exc)
 
     url = config.FLAG_ICON_URL.format(code=code)
     try:
