@@ -1,16 +1,17 @@
-# Builds standalone binaries with PyInstaller for Windows and Linux
+# Builds standalone binaries with PyInstaller for Windows, Linux and macOS
 # (including a Linux AppImage - download, chmod +x, double-click/run, no
 # Python or install step needed), then attaches them all to the GitHub
 # Release of the pushed tag.
 #
 # Trigger: push a tag that starts with "v", e.g.:
-#   git tag -a v2.2.0 -m "..."
-#   git push origin v2.2.0
+#   git tag -a v2.4.0 -m "..."
+#   git push origin v2.4.0
 #
 # Result: a Release for that tag (created if it doesn't exist yet) with:
 #   - proxy-checker-windows.exe
 #   - proxy-checker-linux           (raw binary, needs chmod +x)
 #   - ProxyChecker-x86_64.AppImage  (Linux, chmod +x and run, no install)
+#   - ProxyChecker-macos.zip        (macOS .app bundle, zipped)
 
 name: Build and Release
 
@@ -87,7 +88,7 @@ jobs:
           [Desktop Entry]
           Type=Application
           Name=Proxy Checker
-          Comment=SOCKS4/5 proxy checker with anonymity detection
+          Comment=HTTP/SOCKS4/SOCKS5 proxy checker with anonymity detection
           Exec=proxy-checker-linux
           Icon=proxy-checker
           Categories=Network;Utility;
@@ -115,8 +116,55 @@ jobs:
           name: proxy-checker-appimage
           path: ProxyChecker-x86_64.AppImage
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build .icns icon from the master PNG
+        run: |
+          mkdir icon.iconset
+          sips -z 16 16     assets/icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon.png --out icon.iconset/icon_512x512.png
+          cp assets/icon.png icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o assets/icon.icns
+
+      - name: Build macOS app bundle
+        run: >
+          pyinstaller --onefile --windowed --name "Proxy Checker"
+          --icon assets/icon.icns
+          --add-data "assets:assets"
+          main.py
+
+      - name: Zip the .app bundle
+        run: |
+          cd dist
+          zip -r ../ProxyChecker-macos.zip "Proxy Checker.app"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-checker-macos
+          path: ProxyChecker-macos.zip
+
   release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     # The default GITHUB_TOKEN is read-only unless explicitly granted write
     # access here. Without this block, softprops/action-gh-release fails with
@@ -136,3 +184,4 @@ jobs:
             artifacts/proxy-checker-windows/proxy-checker-windows.exe
             artifacts/proxy-checker-linux/proxy-checker-linux
             artifacts/proxy-checker-appimage/ProxyChecker-x86_64.AppImage
+            artifacts/proxy-checker-macos/ProxyChecker-macos.zip

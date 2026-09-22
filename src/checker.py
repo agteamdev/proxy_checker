@@ -190,15 +190,32 @@ class ProxyChecker:
         # the user or by hitting the target count).
         executor.shutdown(wait=True, cancel_futures=True)
 
-        # Resolve countries + flag icons for everything alive, in one batch pass.
+        # Resolve countries + flag icons for everything alive.
         if alive:
             on_event({"type": "status", "text": "Resolving proxy countries..."})
             country_map = geoip.lookup_countries([r.ip for r in alive])
-            flag_cache = {}
             for r in alive:
                 r.country_code = country_map.get(r.ip, "")
-                if r.country_code and r.country_code not in flag_cache:
-                    flag_cache[r.country_code] = geoip.fetch_flag_png(r.country_code)
+
+            # Fetch each unique country's flag icon CONCURRENTLY instead of
+            # one-by-one - with many proxies spread across dozens of
+            # countries, sequential fetches (one HTTP request per country)
+            # could make the app appear to hang for a long time right after
+            # the scan itself had already finished.
+            unique_codes = sorted({r.country_code for r in alive if r.country_code})
+            flag_cache: dict = {}
+            if unique_codes:
+                on_event({"type": "status", "text": f"Fetching {len(unique_codes)} flag icons..."})
+                with ThreadPoolExecutor(max_workers=8) as flag_pool:
+                    future_to_code = {flag_pool.submit(geoip.fetch_flag_png, code): code for code in unique_codes}
+                    for future in future_to_code:
+                        code = future_to_code[future]
+                        try:
+                            flag_cache[code] = future.result()
+                        except Exception:  # noqa: BLE001 - a missing flag icon is never fatal
+                            flag_cache[code] = None
+
+            for r in alive:
                 r.flag_png = flag_cache.get(r.country_code)
                 on_event({"type": "result", "result": r})
 

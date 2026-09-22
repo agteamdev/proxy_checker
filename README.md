@@ -46,10 +46,10 @@ sortable, filterable results in a single window.
   save.
 - 🧵 Fully non-blocking UI — networking happens on background threads and
   reports progress through a thread-safe queue.
-- 📦 **Standalone builds** — a Windows `.exe`, a raw Linux binary, and a
+- 📦 **Standalone builds** — a Windows `.exe`, a raw Linux binary, a
   Linux **AppImage** (download, `chmod +x`, run — no install, no Python
-  needed) are all built automatically by GitHub Actions and attached to
-  each GitHub Release.
+  needed), and a **macOS** `.app` are all built automatically by GitHub
+  Actions and attached to each GitHub Release.
 
 ## Project layout
 
@@ -154,7 +154,7 @@ All defaults (thread count, timeout, proxy sources, check endpoints, output
 file names) live in `src/config.py` and can be edited directly, or adjusted
 per-run from the GUI (threads/timeout).
 
-## Building standalone binaries (Windows .exe / Linux binary / AppImage)
+## Building standalone binaries (Windows .exe / Linux binary / AppImage / macOS)
 
 Binaries are built automatically by `.github/workflows/release-build.yml`
 whenever a tag starting with `v` is pushed:
@@ -169,19 +169,25 @@ This creates (or updates) the GitHub Release for that tag with:
 - `proxy-checker-linux` — raw Linux binary, `chmod +x` then run
 - `ProxyChecker-x86_64.AppImage` — Linux, `chmod +x` then double-click or
   run; no installation, no Python required
+- `ProxyChecker-macos.zip` — macOS, unzip then run `Proxy Checker.app`.
+  The app isn't code-signed/notarized (that needs a paid Apple Developer
+  account), so macOS Gatekeeper will block it on first launch. Right-click
+  the app → **Open** → **Open** to allow it once, or run
+  `xattr -cr "Proxy Checker.app"` in Terminal first.
 
 To build locally instead:
 
 ```bash
 pip install pyinstaller
 pyinstaller --onefile --windowed --name proxy-checker --icon assets/icon.ico --add-data "assets;assets" main.py   # Windows
-pyinstaller --onefile --name proxy-checker --icon assets/icon.png --add-data "assets:assets" main.py               # Linux/macOS
-# binary/exe appears in dist/
+pyinstaller --onefile --name proxy-checker --icon assets/icon.png --add-data "assets:assets" main.py               # Linux
+pyinstaller --onefile --windowed --name "Proxy Checker" --icon assets/icon.icns --add-data "assets:assets" main.py # macOS (needs assets/icon.icns, built via iconutil - see the workflow)
+# binary/exe/app appears in dist/
 ```
 
 ## Roadmap ideas
 
-- Standalone macOS build.
+- Code-signed/notarized macOS build (requires an Apple Developer account).
 - Per-proxy retry / re-check button in the results table.
 - Save/restore filter and sort preferences between runs.
 
