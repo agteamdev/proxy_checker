@@ -194,8 +194,28 @@ class Checkbox(tk.Canvas):
         self._bg = bg
         self.variable = variable
         self.command = command
+        self._trace_id = None
         self.bind("<Button-1>", self._toggle)
-        self.variable.trace_add("write", lambda *_: self._draw())
+        self._bind_variable(variable)
+        self._draw()
+
+    def _bind_variable(self, variable):
+        if self._trace_id is not None:
+            try:
+                self.variable.trace_remove("write", self._trace_id)
+            except Exception:  # noqa: BLE001 - old var may already be gone
+                pass
+        self.variable = variable
+        self._trace_id = self.variable.trace_add("write", lambda *_: self._draw())
+
+    def rebind(self, variable: tk.BooleanVar, bg: str = None):
+        """Point this same widget at a different row's variable/background -
+        used when a pooled row is reassigned to show different data, instead
+        of creating a brand new Checkbox for every row."""
+        if bg is not None and bg != self._bg:
+            self._bg = bg
+            self.configure(bg=bg)
+        self._bind_variable(variable)
         self._draw()
 
     def _toggle(self, _event=None):
@@ -311,16 +331,123 @@ class ProcessPanel(tk.Frame):
         self.stop_btn.configure(state="normal" if running else "disabled")
 
 
+class _PooledRow:
+    """
+    One reusable set of row widgets, repositioned and refreshed with a
+    different data row as the table scrolls, instead of being destroyed and
+    recreated. This is what makes scrolling through thousands of results
+    fast: only ~20-30 of these ever exist (enough to cover the visible
+    viewport), no matter how many rows are in the dataset.
+    """
+
+    def __init__(self, table: "ResultsTable"):
+        self.table = table
+        self.data = None  # the row dict currently shown, or None if unused
+        self.bg = PALETTE["card"]
+
+        self.frame = tk.Frame(table.canvas, bg=self.bg)
+        self.window_id = table.canvas.create_window(0, 0, window=self.frame, anchor="nw", state="hidden")
+        self.frame.bind("<Button-3>", self._on_context)
+        self.frame.bind("<Button-2>", self._on_context)
+
+        self.check_widget = None
+        self.flag_label = None
+        self.cell_labels: dict = {}
+
+        for key, _label, width, anchor in COLUMN_SPECS:
+            cell = _fixed(self.frame, width, ROW_H, self.bg)
+            cell.pack(side="left")
+            cell.bind("<Button-3>", self._on_context)
+            cell.bind("<Button-2>", self._on_context)
+
+            if key == "check":
+                cb = Checkbox(cell, bg=self.bg, variable=tk.BooleanVar(value=False))
+                cb.pack(expand=True)
+                self.check_widget = cb
+                continue
+
+            if key == "flag":
+                lbl = tk.Label(cell, bg=self.bg)
+                lbl.pack(expand=True)
+                self.flag_label = lbl
+            else:
+                lbl = tk.Label(cell, bg=self.bg, anchor=anchor,
+                                font=("TkDefaultFont", 9, "bold" if key == "anonymity" else "normal"))
+                lbl.pack(fill="both", expand=True, padx=6)
+                self.cell_labels[key] = lbl
+            lbl.bind("<Button-3>", self._on_context)
+            lbl.bind("<Button-2>", self._on_context)
+
+    def _on_context(self, event):
+        if self.data is not None and self.table.on_context_menu:
+            self.table.on_context_menu(event, self.data)
+
+    def set_row(self, row: dict, index: int):
+        self.data = row
+        bg = PALETTE["card"] if index % 2 == 0 else PALETTE["row_alt"]
+        if bg != self.bg:
+            self.bg = bg
+            self.frame.configure(bg=bg)
+            for child in self.frame.winfo_children():
+                if not isinstance(child, Checkbox):
+                    child.configure(bg=bg)
+            for lbl in self.cell_labels.values():
+                lbl.configure(bg=bg)
+            self.flag_label.configure(bg=bg)
+
+        self.check_widget.rebind(row["check_var"], bg=bg)
+
+        photo = row.get("photo")
+        if photo:
+            self.flag_label.configure(image=photo)
+            self.flag_label.image = photo
+        else:
+            self.flag_label.configure(image="")
+            self.flag_label.image = None
+
+        self.cell_labels["num"].configure(text=str(row["num"]), fg=PALETTE["muted"])
+        self.cell_labels["country"].configure(text=row["country"], fg=PALETTE["text"])
+        self.cell_labels["ip"].configure(text=row["ip"], fg=PALETTE["text"])
+        self.cell_labels["port"].configure(text=str(row["port"]), fg=PALETTE["text"])
+        self.cell_labels["protocol"].configure(text=row["protocol"], fg=PALETTE["text"])
+        self.cell_labels["anonymity"].configure(
+            text=row["anonymity"], fg=ANONYMITY_COLORS.get(row["anonymity"], PALETTE["text"])
+        )
+        self.cell_labels["latency"].configure(text=str(row["latency"]), fg=PALETTE["text"])
+
+    def move_to(self, y: int, width: int):
+        self.table.canvas.coords(self.window_id, 0, y)
+        self.table.canvas.itemconfigure(self.window_id, width=width, state="normal")
+
+    def hide(self):
+        self.data = None
+        self.table.canvas.itemconfigure(self.window_id, state="hidden")
+
+
 class ResultsTable(tk.Frame):
-    """Scrollable, header-sortable table built from plain Frames/Labels so
-    each cell can be colored individually (needed for the Anonymity column)."""
+    """
+    Sortable, header-clickable, virtually-scrolled results table.
+
+    It is NOT a ttk.Treeview (which can only color a whole row's text, not
+    individual cells - not enough to show only the Anonymity column in
+    color) and it does NOT create one set of widgets per data row either -
+    with 1000+ results that meant thousands of live Tk widgets and very
+    visible stutter while scrolling/filling in. Instead a small fixed pool
+    of _PooledRow widget-sets (just enough to cover the visible area) is
+    reused and repositioned/refreshed as the table scrolls, so rendering
+    cost depends on viewport size, not on how many results were found.
+    """
+
+    BUFFER_ROWS = 6  # extra pooled rows above/below the viewport for smooth scrolling
 
     def __init__(self, master, on_sort):
         super().__init__(master, bg=PALETTE["card"])
         self.on_sort = on_sort
+        self.on_context_menu = None
         self.sort_column = None
         self.sort_reverse = False
-        self._row_widgets = []
+        self._data: list = []
+        self._pool: list[_PooledRow] = []
 
         header = tk.Frame(self, bg=PALETTE["card_alt"])
         header.pack(fill="x")
@@ -347,44 +474,63 @@ class ResultsTable(tk.Frame):
         body_wrap = tk.Frame(self, bg=PALETTE["card"])
         body_wrap.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(body_wrap, bg=PALETTE["card"], highlightthickness=0)
-        vscroll = ttk.Scrollbar(body_wrap, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=vscroll.set)
+        vscroll = ttk.Scrollbar(body_wrap, orient="vertical", command=self._on_scrollbar)
+        self.canvas.configure(yscrollcommand=lambda a, b: (vscroll.set(a, b), self._update_visible()))
         self.canvas.pack(side="left", fill="both", expand=True)
         vscroll.pack(side="right", fill="y")
 
-        self.rows_frame = tk.Frame(self.canvas, bg=PALETTE["card"])
-        self._rows_window = self.canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
-        self.rows_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
-        self.canvas.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
-        # Force an initial width sync once the window has actually been laid
-        # out - relying on <Configure> alone can leave the embedded window
-        # stuck at a tiny transient width from early in startup, which made
-        # the whole results table appear empty until the user manually
-        # resized the window.
-        self.after_idle(self._sync_canvas_width)
+        self.canvas.bind_all("<Button-4>", lambda e: self._scroll(-1))
+        self.canvas.bind_all("<Button-5>", lambda e: self._scroll(1))
 
         self.empty_label = tk.Label(
-            self.rows_frame, text="No live proxies yet\nStart the scan to see results here",
-            bg=PALETTE["card"], fg=PALETTE["muted"], font=("TkDefaultFont", 11), pady=60, justify="center",
+            self, text="No live proxies yet\nStart the scan to see results here",
+            bg=PALETTE["card"], fg=PALETTE["muted"], font=("TkDefaultFont", 11), justify="center",
         )
-        self.empty_label.pack(fill="both", expand=True)
+        self.empty_label.place(in_=self.canvas, relx=0.5, rely=0.5, anchor="center")
+
+        self.canvas.configure(scrollregion=(0, 0, 0, 1))
+
+    # -- scrolling / windowing ------------------------------------------------
+
+    def _on_scrollbar(self, *args):
+        self.canvas.yview(*args)
+        self._update_visible()
+
+    def _scroll(self, direction: int):
+        self.canvas.yview_scroll(direction, "units")
+        self._update_visible()
+
+    def _on_mousewheel(self, event):
+        self._scroll(-1 if event.delta > 0 else 1)
 
     def _on_canvas_configure(self, event):
         if event.width > 10:
-            self.canvas.itemconfigure(self._rows_window, width=event.width)
+            self._ensure_pool_size()
+            self._update_visible()
 
-    def _sync_canvas_width(self):
-        self.canvas.update_idletasks()
-        width = self.canvas.winfo_width()
-        if width > 10:
-            self.canvas.itemconfigure(self._rows_window, width=width)
+    def _ensure_pool_size(self):
+        viewport_h = self.canvas.winfo_height() or 400
+        needed = max(12, viewport_h // ROW_H + self.BUFFER_ROWS)
+        while len(self._pool) < needed:
+            self._pool.append(_PooledRow(self))
 
-    def _on_mousewheel(self, event):
-        delta = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(delta, "units")
+    def _update_visible(self):
+        canvas_w = self.canvas.winfo_width() or 1
+        if not self._data:
+            for rw in self._pool:
+                rw.hide()
+            return
+        top_y = max(0, int(self.canvas.canvasy(0)))
+        first_index = top_y // ROW_H
+        for slot, rw in enumerate(self._pool):
+            idx = first_index + slot
+            if idx < len(self._data):
+                rw.set_row(self._data[idx], idx)
+                rw.move_to(idx * ROW_H, canvas_w)
+            else:
+                rw.hide()
 
     def _sort_by(self, key):
         if key == self.sort_column:
@@ -396,82 +542,55 @@ class ResultsTable(tk.Frame):
 
     def _on_select_all(self):
         state = self.select_all_var.get()
-        for w in self._row_widgets:
-            w.check_var.set(state)
+        for row in self._data:
+            row["check_var"].set(state)
+
+    # -- data in --------------------------------------------------------------
 
     def clear(self):
-        for w in self._row_widgets:
-            w.destroy()
-        self._row_widgets.clear()
+        self._data = []
+        for rw in self._pool:
+            rw.hide()
         self.select_all_var.set(False)
-        self.empty_label.pack(fill="both", expand=True)
+        self.canvas.configure(scrollregion=(0, 0, 0, 1))
+        self.canvas.yview_moveto(0)
+        self.empty_label.place(in_=self.canvas, relx=0.5, rely=0.5, anchor="center")
 
-    def set_rows(self, rows, on_context_menu):
-        """Full rebuild - used whenever sort or filters change."""
-        for w in self._row_widgets:
-            w.destroy()
-        self._row_widgets.clear()
-        if not rows:
-            self.empty_label.pack(fill="both", expand=True)
-            return
-        self.empty_label.pack_forget()
-        for i, row in enumerate(rows):
-            self._add_row_widget(row, i, on_context_menu)
+    def set_rows(self, rows: list, on_context_menu):
+        """Full rebuild of the visible dataset - used after sort/filter changes."""
+        self.on_context_menu = on_context_menu
+        self._data = rows
+        self.canvas.configure(scrollregion=(0, 0, 0, max(len(rows) * ROW_H, 1)))
+        self.canvas.yview_moveto(0)
+        if rows:
+            self.empty_label.place_forget()
+        else:
+            self.empty_label.place(in_=self.canvas, relx=0.5, rely=0.5, anchor="center")
+        self._ensure_pool_size()
+        self._update_visible()
 
-    def append_row(self, row, index, on_context_menu):
+    def append_row(self, row: dict, on_context_menu):
         """Fast path used while a scan is running with no sort/filter active:
-        add one row at the bottom instead of rebuilding the whole table."""
-        self.empty_label.pack_forget()
-        self._add_row_widget(row, index, on_context_menu)
+        add one row to the dataset without rebuilding what's on screen."""
+        self.on_context_menu = on_context_menu
+        self._data.append(row)
+        self.canvas.configure(scrollregion=(0, 0, 0, len(self._data) * ROW_H))
+        self.empty_label.place_forget()
+        self._ensure_pool_size()
 
-    def _add_row_widget(self, row, index, on_context_menu):
-        bg = PALETTE["card"] if index % 2 == 0 else PALETTE["row_alt"]
-        row_frame = tk.Frame(self.rows_frame, bg=bg)
-        row_frame.pack(fill="x")
-        row_frame.check_var = tk.BooleanVar(value=False)
-        row_frame.row_data = row
-
-        for key, label, width, anchor in COLUMN_SPECS:
-            cell = _fixed(row_frame, width, ROW_H, bg)
-            cell.pack(side="left")
-
-            if key == "check":
-                Checkbox(cell, bg=bg, variable=row_frame.check_var).pack(expand=True)
-                continue
-
-            if key == "flag" and row.get("photo"):
-                flag_lbl = tk.Label(cell, image=row["photo"], bg=bg)
-                flag_lbl.pack(expand=True)
-                self._bind_context(flag_lbl, row, on_context_menu)
-                self._bind_context(cell, row, on_context_menu)
-                continue
-
-            if key == "num":
-                text, fg, bold = str(row["num"]), PALETTE["muted"], False
-            elif key == "flag":
-                text, fg, bold = "", PALETTE["muted"], False
-            elif key == "anonymity":
-                text, fg, bold = row["anonymity"], ANONYMITY_COLORS.get(row["anonymity"], PALETTE["text"]), True
-            else:
-                text, fg, bold = str(row[key]), PALETTE["text"], False
-
-            lbl = tk.Label(
-                cell, text=text, bg=bg, fg=fg, anchor=anchor,
-                font=("TkDefaultFont", 9, "bold" if bold else "normal"),
-            )
-            lbl.pack(fill="both", expand=True, padx=6)
-            self._bind_context(lbl, row, on_context_menu)
-            self._bind_context(cell, row, on_context_menu)
-
-        self._bind_context(row_frame, row, on_context_menu)
-        self._row_widgets.append(row_frame)
-
-    def _bind_context(self, widget, row, on_context_menu):
-        widget.bind("<Button-3>", lambda e, r=row: on_context_menu(e, r))
-        widget.bind("<Button-2>", lambda e, r=row: on_context_menu(e, r))
+        # Only touch the widget pool if the newly appended row actually
+        # falls within the currently visible window. While scrolled to the
+        # top during a live scan (the common case), rows appended far below
+        # are off-screen and refreshing the pool for them would just be
+        # redoing the same already-visible rows over and over for nothing.
+        new_index = len(self._data) - 1
+        top_y = max(0, int(self.canvas.canvasy(0)))
+        first_index = top_y // ROW_H
+        if first_index <= new_index < first_index + len(self._pool):
+            self._update_visible()
 
     def selected_rows(self):
-        return [w.row_data for w in self._row_widgets if w.check_var.get()]
+        return [row for row in self._data if row["check_var"].get()]
 
 
 class ResultsPanel(tk.Frame):
@@ -562,6 +681,7 @@ class ResultsPanel(tk.Frame):
             "anonymity": anonymity,
             "latency": latency_ms,
             "photo": photo,
+            "check_var": tk.BooleanVar(value=False),
         }
         self._rows.append(row)
         self.count_var.set(f"{len(self._rows)} found")
@@ -569,7 +689,7 @@ class ResultsPanel(tk.Frame):
         # Fast path while a scan is running with no sort/filter active: just
         # append one row instead of rebuilding the whole table each time.
         if not self._sort_active() and not self._filter_active():
-            self.table.append_row(row, len(self.table._row_widgets), self._show_context_menu)
+            self.table.append_row(row, self._show_context_menu)
         else:
             self._refresh_view()
 
@@ -805,7 +925,7 @@ class MainWindow(tk.Tk):
         # rest of the run - looking "frozen" even though checking was still
         # progressing in the background).
         processed = 0
-        max_per_tick = 60
+        max_per_tick = 500
         try:
             while processed < max_per_tick:
                 event = self.event_queue.get_nowait()
